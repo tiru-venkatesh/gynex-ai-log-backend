@@ -1,5 +1,5 @@
 // =====================================
-// GYNEX AI - OCR + CHAT BACKEND (STABLE)
+// GYNEX AI - OCR + GEMINI CHAT BACKEND
 // =====================================
 
 require("dotenv").config();
@@ -13,23 +13,26 @@ const path = require("path");
 const sharp = require("sharp");
 const { exec } = require("child_process");
 
+// Gemini
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------------
-// FILE UPLOAD
-// ---------------------------------
+// --------------------------------
+// UPLOAD
+// --------------------------------
 const upload = multer({ dest: "uploads/" });
 
-// ---------------------------------
+// --------------------------------
 // API KEY
-// ---------------------------------
+// --------------------------------
 const API_KEY = "GYNEX_OCR_123";
 
-// ---------------------------------
-// API KEY CHECK
-// ---------------------------------
 function checkKey(req, res, next) {
   const key = req.headers["x-api-key"];
   if (!key || key !== API_KEY) {
@@ -38,9 +41,9 @@ function checkKey(req, res, next) {
   next();
 }
 
-// ---------------------------------
-// PDF → IMAGE USING PDFTOPPM
-// ---------------------------------
+// --------------------------------
+// PDF → IMAGE
+// --------------------------------
 function pdfToImages(pdfPath, outDir) {
   return new Promise((resolve, reject) => {
     exec(
@@ -53,23 +56,16 @@ function pdfToImages(pdfPath, outDir) {
   });
 }
 
-// ---------------------------------
+// --------------------------------
 // HEALTH
-// ---------------------------------
+// --------------------------------
 app.get("/", (req, res) => {
   res.send("GYNEX AI Backend Running");
 });
 
-// ---------------------------------
-// ANALYZE TEST
-// ---------------------------------
-app.get("/analyze", (req, res) => {
-  res.send("Analyze endpoint alive (POST only)");
-});
-
-// ---------------------------------
+// --------------------------------
 // OCR ENDPOINT
-// ---------------------------------
+// --------------------------------
 app.post(
   "/extract-text",
   checkKey,
@@ -84,13 +80,13 @@ app.post(
       const filePath = req.file.path;
       const name = req.file.originalname.toLowerCase();
 
-      // ---------- TXT ----------
+      // -------- TXT --------
       if (name.endsWith(".txt")) {
         const text = fs.readFileSync(filePath, "utf8");
         return res.json({ text });
       }
 
-      // ---------- PDF ----------
+      // -------- PDF --------
       if (name.endsWith(".pdf")) {
 
         const outDir = "uploads/pdf_images";
@@ -110,7 +106,7 @@ app.post(
 
           await sharp(imgPath)
             .grayscale()
-            .resize({ width: 2200 })
+            .resize({ width: 2400 })
             .sharpen()
             .normalize()
             .toFile(clean);
@@ -123,12 +119,12 @@ app.post(
         return res.json({ text: finalText });
       }
 
-      // ---------- IMAGE ----------
+      // -------- IMAGE --------
       const clean = filePath + "_clean.png";
 
       await sharp(filePath)
         .grayscale()
-        .resize({ width: 2200 })
+        .resize({ width: 2400 })
         .sharpen()
         .normalize()
         .toFile(clean);
@@ -144,27 +140,38 @@ app.post(
   }
 );
 
-// ---------------------------------
-// CHAT / ANALYZE (TEMP STUB)
-// ---------------------------------
+// --------------------------------
+// AI ANALYZE (GEMINI)
+// --------------------------------
 app.post("/analyze", async (req, res) => {
   try {
 
     const { text, question } = req.body;
 
-    res.json({
-      answer: "AI Chat coming soon. OCR is working successfully."
-    });
+    const prompt = `
+You are a professional document AI assistant.
+
+DOCUMENT:
+${text}
+
+USER QUESTION:
+${question || "Give a clear short summary"}
+`;
+
+    const result = await model.generateContent(prompt);
+    const answer = result.response.text();
+
+    res.json({ answer });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "AI failed" });
+    res.status(500).json({ error: "AI analysis failed" });
   }
 });
 
-// ---------------------------------
+// --------------------------------
 // START SERVER
-// ---------------------------------
+// --------------------------------
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
