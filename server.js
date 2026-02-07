@@ -2,7 +2,6 @@
 // GYNEX AI - OCR + CHAT BACKEND (STABLE)
 // =====================================
 
-process.env.PDF_POPPLER_SILENT = "true";
 require("dotenv").config();
 
 const express = require("express");
@@ -12,7 +11,7 @@ const Tesseract = require("tesseract.js");
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
-const pdfPoppler = require("pdf-poppler");
+const { exec } = require("child_process");
 
 const app = express();
 app.use(cors());
@@ -29,7 +28,7 @@ const upload = multer({ dest: "uploads/" });
 const API_KEY = "GYNEX_OCR_123";
 
 // ---------------------------------
-// API KEY MIDDLEWARE
+// API KEY CHECK
 // ---------------------------------
 function checkKey(req, res, next) {
   const key = req.headers["x-api-key"];
@@ -40,6 +39,21 @@ function checkKey(req, res, next) {
 }
 
 // ---------------------------------
+// PDF → IMAGE USING PDFTOPPM
+// ---------------------------------
+function pdfToImages(pdfPath, outDir) {
+  return new Promise((resolve, reject) => {
+    exec(
+      `pdftoppm -r 300 "${pdfPath}" "${outDir}/page" -png`,
+      (err) => {
+        if (err) reject(err);
+        else resolve();
+      }
+    );
+  });
+}
+
+// ---------------------------------
 // HEALTH
 // ---------------------------------
 app.get("/", (req, res) => {
@@ -47,10 +61,10 @@ app.get("/", (req, res) => {
 });
 
 // ---------------------------------
-// ANALYZE TEST (GET)
+// ANALYZE TEST
 // ---------------------------------
 app.get("/analyze", (req, res) => {
-  res.send("Analyze endpoint is alive (POST only)");
+  res.send("Analyze endpoint alive (POST only)");
 });
 
 // ---------------------------------
@@ -62,6 +76,7 @@ app.post(
   upload.single("file"),
   async (req, res) => {
     try {
+
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
@@ -77,25 +92,19 @@ app.post(
 
       // ---------- PDF ----------
       if (name.endsWith(".pdf")) {
-        const outDir = "uploads/pdf_images";
 
+        const outDir = "uploads/pdf_images";
         if (!fs.existsSync(outDir)) {
           fs.mkdirSync(outDir, { recursive: true });
         }
 
-        // Force 300 DPI (no warnings)
-        await pdfPoppler.convert(filePath, {
-          format: "png",
-          out_dir: outDir,
-          out_prefix: "page",
-          page: null,
-          dpi: 300
-        });
+        await pdfToImages(filePath, outDir);
 
         const pages = fs.readdirSync(outDir);
         let finalText = "";
 
         for (const img of pages) {
+
           const imgPath = path.join(outDir, img);
           const clean = imgPath + "_clean.png";
 
@@ -106,10 +115,7 @@ app.post(
             .normalize()
             .toFile(clean);
 
-          const result = await Tesseract.recognize(
-            clean,
-            "eng"
-          );
+          const result = await Tesseract.recognize(clean, "eng");
 
           finalText += result.data.text + "\n";
         }
@@ -127,10 +133,7 @@ app.post(
         .normalize()
         .toFile(clean);
 
-      const result = await Tesseract.recognize(
-        clean,
-        "eng"
-      );
+      const result = await Tesseract.recognize(clean, "eng");
 
       return res.json({ text: result.data.text });
 
@@ -142,13 +145,13 @@ app.post(
 );
 
 // ---------------------------------
-// CHAT / ANALYZE (POST)
+// CHAT / ANALYZE (TEMP STUB)
 // ---------------------------------
 app.post("/analyze", async (req, res) => {
   try {
+
     const { text, question } = req.body;
 
-    // TEMP RESPONSE (Stable)
     res.json({
       answer: "AI Chat coming soon. OCR is working successfully."
     });
