@@ -1,8 +1,4 @@
-// =====================================
-// GYNEX AI - FORCE OCR + AI ANALYSIS BACKEND
-// =====================================
 
-process.env.PDF_POPPLER_SILENT = "true";
 require("dotenv").config();
 
 const express = require("express");
