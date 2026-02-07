@@ -1,7 +1,8 @@
 // =====================================
-// GYNEX AI - IMAGE OCR BACKEND (LINUX SAFE)
+// GYNEX AI - OCR + CHAT BACKEND (STABLE)
 // =====================================
 
+process.env.PDF_POPPLER_SILENT = "true";
 require("dotenv").config();
 
 const express = require("express");
@@ -9,22 +10,27 @@ const multer = require("multer");
 const cors = require("cors");
 const Tesseract = require("tesseract.js");
 const fs = require("fs");
+const path = require("path");
 const sharp = require("sharp");
+const pdfPoppler = require("pdf-poppler");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------
-// UPLOAD CONFIG
-// ---------------------------
+// ---------------------------------
+// FILE UPLOAD
+// ---------------------------------
 const upload = multer({ dest: "uploads/" });
 
-// ---------------------------
-// SIMPLE API KEY
-// ---------------------------
+// ---------------------------------
+// API KEY
+// ---------------------------------
 const API_KEY = "GYNEX_OCR_123";
 
+// ---------------------------------
+// API KEY MIDDLEWARE
+// ---------------------------------
 function checkKey(req, res, next) {
   const key = req.headers["x-api-key"];
   if (!key || key !== API_KEY) {
@@ -33,61 +39,97 @@ function checkKey(req, res, next) {
   next();
 }
 
-// ---------------------------
-// HEALTH CHECK
-// ---------------------------
+// ---------------------------------
+// HEALTH
+// ---------------------------------
 app.get("/", (req, res) => {
-  res.send("GYNEX AI OCR Backend Running");
+  res.send("GYNEX AI Backend Running");
 });
 
-// =================================================
-// IMAGE OCR ONLY (NO PDF)
-// =================================================
+// ---------------------------------
+// ANALYZE TEST (GET)
+// ---------------------------------
+app.get("/analyze", (req, res) => {
+  res.send("Analyze endpoint is alive (POST only)");
+});
+
+// ---------------------------------
+// OCR ENDPOINT
+// ---------------------------------
 app.post(
   "/extract-text",
   checkKey,
   upload.single("file"),
   async (req, res) => {
     try {
-
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
 
       const filePath = req.file.path;
-      const fileName = req.file.originalname.toLowerCase();
+      const name = req.file.originalname.toLowerCase();
 
-      // TXT FILE
-      if (fileName.endsWith(".txt")) {
+      // ---------- TXT ----------
+      if (name.endsWith(".txt")) {
         const text = fs.readFileSync(filePath, "utf8");
         return res.json({ text });
       }
 
-      // BLOCK PDF
-      if (fileName.endsWith(".pdf")) {
-        return res.json({
-          error: "PDF OCR disabled on server. Upload image instead."
+      // ---------- PDF ----------
+      if (name.endsWith(".pdf")) {
+        const outDir = "uploads/pdf_images";
+
+        if (!fs.existsSync(outDir)) {
+          fs.mkdirSync(outDir, { recursive: true });
+        }
+
+        // Force 300 DPI (no warnings)
+        await pdfPoppler.convert(filePath, {
+          format: "png",
+          out_dir: outDir,
+          out_prefix: "page",
+          page: null,
+          dpi: 300
         });
+
+        const pages = fs.readdirSync(outDir);
+        let finalText = "";
+
+        for (const img of pages) {
+          const imgPath = path.join(outDir, img);
+          const clean = imgPath + "_clean.png";
+
+          await sharp(imgPath)
+            .grayscale()
+            .resize({ width: 2200 })
+            .sharpen()
+            .normalize()
+            .toFile(clean);
+
+          const result = await Tesseract.recognize(
+            clean,
+            "eng"
+          );
+
+          finalText += result.data.text + "\n";
+        }
+
+        return res.json({ text: finalText });
       }
 
-      // PREPROCESS IMAGE
-      const cleaned = filePath + "_clean.png";
+      // ---------- IMAGE ----------
+      const clean = filePath + "_clean.png";
 
       await sharp(filePath)
-        .resize({ width: 2000 })
         .grayscale()
+        .resize({ width: 2200 })
         .sharpen()
         .normalize()
-        .toFile(cleaned);
+        .toFile(clean);
 
-      // OCR
       const result = await Tesseract.recognize(
-        cleaned,
-        "eng",
-        {
-          tessedit_pageseg_mode: 3,
-          preserve_interword_spaces: 1
-        }
+        clean,
+        "eng"
       );
 
       return res.json({ text: result.data.text });
@@ -99,10 +141,28 @@ app.post(
   }
 );
 
-// ---------------------------
+// ---------------------------------
+// CHAT / ANALYZE (POST)
+// ---------------------------------
+app.post("/analyze", async (req, res) => {
+  try {
+    const { text, question } = req.body;
+
+    // TEMP RESPONSE (Stable)
+    res.json({
+      answer: "AI Chat coming soon. OCR is working successfully."
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "AI failed" });
+  }
+});
+
+// ---------------------------------
 // START SERVER
-// ---------------------------
-const PORT = process.env.PORT || 5000;
+// ---------------------------------
+const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
   console.log("GYNEX AI backend running on port", PORT);
