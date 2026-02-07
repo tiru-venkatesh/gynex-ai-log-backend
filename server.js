@@ -1,5 +1,5 @@
 // =====================================
-// GYNEX AI - OCR + GEMINI CHAT BACKEND
+// GYNEX AI - OCR + GITHUB MODELS CHAT BACKEND
 // =====================================
 
 require("dotenv").config();
@@ -13,24 +13,24 @@ const path = require("path");
 const sharp = require("sharp");
 const { exec } = require("child_process");
 
-// Gemini
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// GitHub Models (OpenAI compatible)
+const OpenAI = require("openai");
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
+// --------------------
+// APP INIT
+// --------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --------------------------------
-// UPLOAD
-// --------------------------------
+// --------------------
+// FILE UPLOAD
+// --------------------
 const upload = multer({ dest: "uploads/" });
 
-// --------------------------------
-// API KEY
-// --------------------------------
+// --------------------
+// API KEY FOR OCR
+// --------------------
 const API_KEY = "GYNEX_OCR_123";
 
 function checkKey(req, res, next) {
@@ -41,9 +41,17 @@ function checkKey(req, res, next) {
   next();
 }
 
-// --------------------------------
+// --------------------
+// GITHUB MODELS CLIENT
+// --------------------
+const aiClient = new OpenAI({
+  apiKey: process.env.GITHUB_TOKEN,
+  baseURL: "https://models.inference.ai.azure.com"
+});
+
+// --------------------
 // PDF → IMAGE
-// --------------------------------
+// --------------------
 function pdfToImages(pdfPath, outDir) {
   return new Promise((resolve, reject) => {
     exec(
@@ -56,16 +64,16 @@ function pdfToImages(pdfPath, outDir) {
   });
 }
 
-// --------------------------------
+// --------------------
 // HEALTH
-// --------------------------------
+// --------------------
 app.get("/", (req, res) => {
   res.send("GYNEX AI Backend Running");
 });
 
-// --------------------------------
+// =================================================
 // OCR ENDPOINT
-// --------------------------------
+// =================================================
 app.post(
   "/extract-text",
   checkKey,
@@ -80,13 +88,13 @@ app.post(
       const filePath = req.file.path;
       const name = req.file.originalname.toLowerCase();
 
-      // -------- TXT --------
+      // ---------- TXT ----------
       if (name.endsWith(".txt")) {
         const text = fs.readFileSync(filePath, "utf8");
         return res.json({ text });
       }
 
-      // -------- PDF --------
+      // ---------- PDF ----------
       if (name.endsWith(".pdf")) {
 
         const outDir = "uploads/pdf_images";
@@ -112,14 +120,13 @@ app.post(
             .toFile(clean);
 
           const result = await Tesseract.recognize(clean, "eng");
-
           finalText += result.data.text + "\n";
         }
 
         return res.json({ text: finalText });
       }
 
-      // -------- IMAGE --------
+      // ---------- IMAGE ----------
       const clean = filePath + "_clean.png";
 
       await sharp(filePath)
@@ -140,38 +147,47 @@ app.post(
   }
 );
 
-// --------------------------------
-// AI ANALYZE (GEMINI)
-// --------------------------------
+// =================================================
+// AI CHAT (GITHUB MODELS)
+// =================================================
 app.post("/analyze", async (req, res) => {
   try {
 
     const { text, question } = req.body;
 
+    if (!process.env.GITHUB_TOKEN) {
+      return res.status(500).json({ error: "Missing GITHUB_TOKEN" });
+    }
+
     const prompt = `
-You are a professional document AI assistant.
+You are a professional document assistant.
 
 DOCUMENT:
 ${text}
 
 USER QUESTION:
-${question || "Give a clear short summary"}
+${question || "Give a short clear summary"}
 `;
 
-    const result = await model.generateContent(prompt);
-    const answer = result.response.text();
+    const response = await aiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3
+    });
 
-    res.json({ answer });
+    res.json({
+      answer: response.choices[0].message.content
+    });
 
   } catch (err) {
-    console.error(err);
+    console.error("AI Error:", err);
     res.status(500).json({ error: "AI analysis failed" });
   }
 });
 
-// --------------------------------
+// --------------------
 // START SERVER
-// --------------------------------
+// --------------------
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
