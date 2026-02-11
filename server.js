@@ -1,20 +1,23 @@
 // =====================================
-// GYNEX AI - OCR + GITHUB MODELS CHAT BACKEND
+// GYNEX AI - DOCUMENT INTELLIGENCE BACKEND
 // =====================================
 
 require("dotenv").config();
+console.log("TOKEN:", process.env.GITHUB_TOKEN);
 
 const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
-const Tesseract = require("tesseract.js");
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
+const Tesseract = require("tesseract.js");
+const pdfParse = require("pdf-parse");
+const pLimit = require("p-limit").default;
 const { exec } = require("child_process");
-
-// GitHub Models (OpenAI compatible)
 const OpenAI = require("openai");
+
+const { addDocuments, search } = require("./services/vectorStore");
 
 // --------------------
 // APP INIT
@@ -22,27 +25,22 @@ const OpenAI = require("openai");
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// --------------------
-// FILE UPLOAD
-// --------------------
 const upload = multer({ dest: "uploads/" });
 
 // --------------------
-// API KEY FOR OCR
+// SECURITY
 // --------------------
-const API_KEY = "GYNEX_OCR_123";
+const API_KEY = process.env.OCR_KEY || "GYNEX_OCR_123";
 
 function checkKey(req, res, next) {
-  const key = req.headers["x-api-key"];
-  if (!key || key !== API_KEY) {
+  if (req.headers["x-api-key"] !== API_KEY) {
     return res.status(401).json({ error: "Invalid API Key" });
   }
   next();
 }
 
 // --------------------
-// GITHUB MODELS CLIENT
+// AI CLIENT
 // --------------------
 const aiClient = new OpenAI({
   apiKey: process.env.GITHUB_TOKEN,
@@ -50,23 +48,171 @@ const aiClient = new OpenAI({
 });
 
 // --------------------
-// PDF → IMAGE
-// --------------------
+const limit = pLimit(4);
+
+// =================================================
+// UTILS
+// =================================================
+
+function cleanText(text) {
+  if (!text || typeof text !== "string") return "";
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function chunkText(text, size = 2500) {
+  const chunks = [];
+  for (let i = 0; i < text.length; i += size) {
+    const part = text.slice(i, i + size);
+    if (part.trim().length > 50) {
+      chunks.push(part);
+    }
+  }
+  return chunks;
+}
+
+// =================================================
+// PDF → IMAGE (WINDOWS SAFE)
+// =================================================
+
 function pdfToImages(pdfPath, outDir) {
   return new Promise((resolve, reject) => {
     exec(
       `pdftoppm -r 300 "${pdfPath}" "${outDir}/page" -png`,
-      (err) => {
-        if (err) reject(err);
-        else resolve();
-      }
+      err => err ? reject(err) : resolve()
     );
   });
 }
 
-// --------------------
+// =================================================
+// HYBRID PDF EXTRACTION
+// =================================================
+
+async function extractFromPDF(pdfPath) {
+
+  // Digital text first
+  const buffer = fs.readFileSync(pdfPath);
+  const parsed = await pdfParse(buffer);
+
+  if (parsed.text && parsed.text.trim().length > 1000) {
+    return parsed.text.split("\f");
+  }
+
+  // OCR fallback
+  const outDir = "uploads/pdf_pages";
+  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+  await pdfToImages(pdfPath, outDir);
+
+  const images = fs.readdirSync(outDir).sort();
+  const pages = [];
+
+  await Promise.all(
+    images.map(img =>
+      limit(async () => {
+
+        const imgPath = path.join(outDir, img);
+        const cleanImg = imgPath + "_clean.png";
+
+        await sharp(imgPath)
+          .grayscale()
+          .resize({ width: 2600 })
+          .normalize()
+          .sharpen()
+          .rotate()
+          .toFile(cleanImg);
+
+        const r = await Tesseract.recognize(
+          cleanImg,
+          "eng+hin+tam+tel"
+        );
+
+        if (r.data.text && r.data.text.trim().length > 0) {
+          pages.push(r.data.text);
+        }
+      })
+    )
+  );
+
+  fs.rmSync(outDir, { recursive: true, force: true });
+
+  return pages;
+}
+
+// =================================================
+// FALLBACK AI
+// =================================================
+
+async function fallbackAI(text, question) {
+
+  const final = await aiClient.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{
+      role: "user",
+      content: `
+You are a document assistant.
+
+DOCUMENT:
+${text}
+
+QUESTION:
+${question}
+`
+    }]
+  });
+
+  return final.choices[0].message.content;
+}
+
+// =================================================
+// RAG PIPELINE
+// =================================================
+
+async function analyzeWithVector(pages, question) {
+
+  let allChunks = [];
+
+  pages.forEach(p => {
+    const cleaned = cleanText(p);
+    if (cleaned.length > 50) {
+      allChunks.push(...chunkText(cleaned));
+    }
+  });
+
+  if (allChunks.length === 0) {
+    return fallbackAI(pages.join("\n"), question);
+  }
+
+  await addDocuments(allChunks);
+
+  const matches = await search(question, 6);
+
+  if (!matches || matches.length === 0) {
+    return fallbackAI(pages.join("\n"), question);
+  }
+
+  const context = matches.join("\n");
+
+  const final = await aiClient.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{
+      role: "user",
+      content: `
+Answer using ONLY this context:
+
+${context}
+
+Question: ${question}
+`
+    }]
+  });
+
+  return final.choices[0].message.content;
+}
+
+// =================================================
 // HEALTH
-// --------------------
+// =================================================
+
 app.get("/", (req, res) => {
   res.send("GYNEX AI Backend Running");
 });
@@ -74,11 +220,13 @@ app.get("/", (req, res) => {
 // =================================================
 // OCR ENDPOINT
 // =================================================
+
 app.post(
   "/extract-text",
   checkKey,
   upload.single("file"),
   async (req, res) => {
+
     try {
 
       if (!req.file) {
@@ -87,58 +235,41 @@ app.post(
 
       const filePath = req.file.path;
       const name = req.file.originalname.toLowerCase();
+      let pages = [];
 
-      // ---------- TXT ----------
       if (name.endsWith(".txt")) {
-        const text = fs.readFileSync(filePath, "utf8");
-        return res.json({ text });
+        pages = [fs.readFileSync(filePath, "utf8")];
       }
 
-      // ---------- PDF ----------
-      if (name.endsWith(".pdf")) {
-
-        const outDir = "uploads/pdf_images";
-        if (!fs.existsSync(outDir)) {
-          fs.mkdirSync(outDir, { recursive: true });
-        }
-
-        await pdfToImages(filePath, outDir);
-
-        const pages = fs.readdirSync(outDir);
-        let finalText = "";
-
-        for (const img of pages) {
-
-          const imgPath = path.join(outDir, img);
-          const clean = imgPath + "_clean.png";
-
-          await sharp(imgPath)
-            .grayscale()
-            .resize({ width: 2400 })
-            .sharpen()
-            .normalize()
-            .toFile(clean);
-
-          const result = await Tesseract.recognize(clean, "eng");
-          finalText += result.data.text + "\n";
-        }
-
-        return res.json({ text: finalText });
+      else if (name.endsWith(".pdf")) {
+        pages = await extractFromPDF(filePath);
       }
 
-      // ---------- IMAGE ----------
-      const clean = filePath + "_clean.png";
+      else {
+        const cleanImg = filePath + "_clean.png";
 
-      await sharp(filePath)
-        .grayscale()
-        .resize({ width: 2400 })
-        .sharpen()
-        .normalize()
-        .toFile(clean);
+        await sharp(filePath)
+          .grayscale()
+          .resize({ width: 2600 })
+          .normalize()
+          .sharpen()
+          .rotate()
+          .toFile(cleanImg);
 
-      const result = await Tesseract.recognize(clean, "eng");
+        const r = await Tesseract.recognize(
+          cleanImg,
+          "eng+hin+tam+tel"
+        );
 
-      return res.json({ text: result.data.text });
+        pages = [r.data.text];
+      }
+
+      fs.unlinkSync(filePath);
+
+      res.json({
+        pages: pages.length,
+        text: pages.join("\n")
+      });
 
     } catch (err) {
       console.error(err);
@@ -148,48 +279,33 @@ app.post(
 );
 
 // =================================================
-// AI CHAT (GITHUB MODELS)
+// AI ANALYZE
 // =================================================
+
 app.post("/analyze", async (req, res) => {
+
   try {
 
     const { text, question } = req.body;
 
-    if (!process.env.GITHUB_TOKEN) {
-      return res.status(500).json({ error: "Missing GITHUB_TOKEN" });
-    }
+    const pages = Array.isArray(text) ? text : [text];
 
-    const prompt = `
-You are a professional document assistant.
+    const answer = await analyzeWithVector(pages, question);
 
-DOCUMENT:
-${text}
-
-USER QUESTION:
-${question || "Give a short clear summary"}
-`;
-
-    const response = await aiClient.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.3
-    });
-
-    res.json({
-      answer: response.choices[0].message.content
-    });
+    res.json({ answer });
 
   } catch (err) {
-    console.error("AI Error:", err);
-    res.status(500).json({ error: "AI analysis failed" });
+    console.error(err);
+    res.status(500).json({ error: "AI failed" });
   }
 });
 
-// --------------------
+// =================================================
 // START SERVER
-// --------------------
+// =================================================
+
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
-  console.log("GYNEX AI backend running on port", PORT);
+  console.log("GYNEX AI running on port", PORT);
 });
