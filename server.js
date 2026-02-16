@@ -4,7 +4,7 @@
 
 require("dotenv").config();
 console.log("TOKEN:", process.env.GITHUB_TOKEN);
-
+const { buildAdvancedExcel } = require("./services/advancedExcelWriter");
 const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
@@ -44,12 +44,57 @@ function checkKey(req, res, next) {
 // --------------------
 const aiClient = new OpenAI({
   apiKey: process.env.GITHUB_TOKEN,
-  baseURL: "https://models.inference.ai.azure.com"
+  baseURL: "https://models.github.ai/inference",
+  defaultHeaders: {
+    Authorization: `Bearer ${process.env.GITHUB_TOKEN}`
+  }
 });
+
+function safeJSON(text) {
+  if (!text) throw new Error("Empty AI response");
+
+  // Remove markdown fences
+  text = text.replace(/```json/g, "");
+  text = text.replace(/```/g, "");
+
+  // Trim
+  text = text.trim();
+
+  return JSON.parse(text);
+}
 
 // --------------------
 const limit = pLimit(4);
 
+async function aiBuildTable(text) {
+
+  const r = await aiClient.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{
+    role: "user",
+    content: `
+Analyze this document and build clean tables.
+
+Rules:
+- Each table must have: 
+  - sheet (string)
+  - rows (array of objects)
+- All rows inside one table MUST use SAME keys
+- Use short professional column names
+- Convert numbers to numbers
+- Remove currency symbols
+- Remove empty columns
+
+Return ONLY JSON.
+
+DOCUMENT:
+${text}
+`
+  }]
+});
+
+return safeJSON(r.choices[0].message.content);
+}
 // =================================================
 // UTILS
 // =================================================
@@ -281,6 +326,43 @@ app.post(
 // =================================================
 // AI ANALYZE
 // =================================================
+function bigChunks(text, size = 10000){
+  const arr = [];
+  for(let i = 0; i < text.length; i += size){
+    arr.push(text.slice(i, i + size));
+  }
+  return arr;
+}
+async function aiBuildTables(text) {
+
+  const r = await aiClient.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{
+      role: "user",
+      content: `
+Convert this document into structured tables.
+
+IMPORTANT:
+- Do NOT summarize.
+- Do NOT drop rows.
+- Include ALL rows exactly as they appear.
+- If many rows exist, include all.
+- Return JSON ONLY.
+
+Format:
+
+[
+ { "sheet":"Sheet Name", "rows":[ {...}, {...} ] }
+]
+
+DOCUMENT:
+${text}
+`
+    }]
+  });
+
+  return safeJSON(r.choices[0].message.content);
+}
 
 app.post("/analyze", async (req, res) => {
 
@@ -298,6 +380,105 @@ app.post("/analyze", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "AI failed" });
   }
+});
+
+async function aiBuildTables(text) {
+
+  const r = await aiClient.chat.completions.create({
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    messages: [{
+      role: "user",
+      content: `
+You are a data extraction engine.
+
+Rules:
+- Convert document into MULTIPLE logical tables
+- Never summarize
+- Never drop rows
+- Every row must be preserved
+- Same keys inside one table
+- Numbers must be numbers
+- Return JSON ONLY
+
+Format:
+[
+ { "sheet":"Sheet Name", "rows":[ {...}, {...} ] }
+]
+
+DOCUMENT:
+${text}
+`
+    }]
+  });
+
+  return safeJSON(r.choices[0].message.content);
+}
+
+function bigChunks(text, size = 12000) {
+  const arr = [];
+  for (let i = 0; i < text.length; i += size) {
+    arr.push(text.slice(i, i + size));
+  }
+  return arr;
+}
+// =================================================
+// ADVANCED EXCEL ENDPOINT
+// =================================================
+app.post("/text-to-excel-advanced", async (req, res) => {
+  try {
+
+    const { text } = req.body;
+    if (!text) {
+      return res.status(400).json({ error: "Text is required" });
+    }
+
+    const fullText = Array.isArray(text) ? text.join("\n") : text;
+
+    const chunks = bigChunks(fullText);
+    let allTables = [];
+
+    for (const c of chunks) {
+      try {
+        const tables = await aiBuildTables(c);
+        if (Array.isArray(tables)) {
+          allTables.push(...tables);
+        }
+      } catch {
+        console.log("⚠️ Chunk failed, skipping");
+      }
+    }
+
+    if (allTables.length === 0) {
+      return res.status(400).json({
+        error: "No tables detected from document"
+      });
+    }
+
+    const filePath = `uploads/${Date.now()}.xlsx`;
+
+    await buildAdvancedExcel(allTables, filePath);
+
+    res.download(filePath);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Excel generation failed" });
+  }
+});
+app.post("/text-to-excel", async (req, res) => {
+  try {
+    const filePath = `uploads/${Date.now()}.xlsx`;
+
+    await buildAdvancedExcel(allTables, filePath);
+
+    res.download(filePath);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Excel generation failed" });
+  }
+
 });
 
 // =================================================
